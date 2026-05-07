@@ -176,20 +176,25 @@ namespace Parquet.Meta.Proto {
                 case CompactType.I64:
                     ReadI64();
                     break;
-                //case Types.Double:
-                    //await protocol.ReadDoubleAsync(cancellationToken);
-                    //break;
+                case CompactType.Double:
+                    _inputStream.Seek(8, SeekOrigin.Current);
+                    break;
                 case CompactType.Binary:
                     // Don't try to decode the string, just skip it.
                     ReadBinary();
                     break;
-                //case TType.Uuid:
-                //    await protocol.ReadUuidAsync(cancellationToken);
-                //    break;
+                case CompactType.Uuid:
+                    // Apache Thrift compact spec: UUID is 16 raw bytes, no length prefix.
+                    _inputStream.Seek(16, SeekOrigin.Current);
+                    break;
                 case CompactType.Struct:
                     StructBegin();
-                    while(ReadNextField(out _, out _)) {
-
+                    while(ReadNextField(out _, out CompactType nestedType)) {
+                        // Patch (osprey): the original loop body was empty, which
+                        // reads each nested field's header but never consumes its
+                        // value -- mis-aligning the stream after the first field.
+                        // Recursing into SkipField correctly consumes the value.
+                        SkipField(nestedType);
                     }
                     StructEnd();
                     break;

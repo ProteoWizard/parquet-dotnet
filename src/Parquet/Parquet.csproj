@@ -13,7 +13,7 @@
         <DebugType>full</DebugType>
         <DebugSymbols>true</DebugSymbols>
         <PackageTags>apache parquet dotnet core net c# f# windows linux macos ios android xboxone xbox</PackageTags>
-        <LangVersion>latest</LangVersion>
+        <LangVersion>12</LangVersion>
         <Nullable>enable</Nullable>
 
         <!-- Sign with a fake no password signature for convenience. Note this is not a proof of anything.-->
