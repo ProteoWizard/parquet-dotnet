@@ -77,7 +77,22 @@ keeps the upstream sources buildable without touching the field names.
 
 ## Upstream PR
 
-When time permits, file an upstream PR with just the `ThriftCompactProtocolReader`
-change. Suggested title: "Fix struct-skip miscount and add Double/Uuid cases in
-ThriftCompactProtocolReader". The `Parquet.csproj` LangVersion pin is local-only
-and need not be upstreamed.
+Filed as **[aloneguid/parquet-dotnet#747](https://github.com/aloneguid/parquet-dotnet/pull/747)**
+on 2026-05-07.
+
+Scope of the upstream PR is the `ThriftCompactProtocolReader` change plus a
+focused regression test in `src/Parquet.Test/ThriftTest.cs`. The
+`Parquet.csproj` `<LangVersion>12</LangVersion>` pin is local-only (an
+artifact of building under .NET 10 SDK, which resolves `latest` to C# 14
+where `field` becomes a contextual keyword and breaks `StructField.cs`)
+and is not upstreamed.
+
+Once #747 lands and a release ships:
+
+  * bump `pwiz_tools/Shared/Lib/Parquet/ParquetNet.dll` in pwiz to the stock
+    upstream NuGet release
+  * delete `pwiz_tools/OspreySharp/Directory.Build.targets`'s
+    `OverridePatchedParquetNet` target (no longer needed)
+  * archive or delete this fork (the `BinariesForProteoWizard/` artifacts
+    can be removed; the `src/` source can stay or go depending on whether
+    you want a reproducible record of what we built against)
