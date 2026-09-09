@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
@@ -44,13 +44,46 @@ namespace Parquet.File {
             FieldPath fullPath, DataColumn column,
             CancellationToken cancellationToken = default) {
 
+            using PreparedColumn prepared = await PrepareAsync(fullPath, column, cancellationToken);
+            return await EmitAsync(prepared, cancellationToken);
+        }
+
+        /// <summary>
+        /// A column chunk fully encoded and compressed into memory, ready to be appended
+        /// to the output stream by <see cref="EmitAsync"/>.
+        /// </summary>
+        internal sealed class PreparedColumn : IDisposable {
+            public ColumnChunk Chunk = null!;
+            public MemoryStream Buffer = null!;
+
+            public void Dispose() {
+                Buffer?.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Encode and compress one column chunk into its own memory buffer. Touches no
+        /// shared output-stream state, so many columns can be prepared CONCURRENTLY -
+        /// which is the point: compression is the dominant cost of writing a parquet
+        /// and it is a pure transform. The returned chunk carries placeholder offsets;
+        /// <see cref="EmitAsync"/> rewrites them once the real stream position is known.
+        /// </summary>
+        internal async Task<PreparedColumn> PrepareAsync(
+            FieldPath fullPath, DataColumn column,
+            CancellationToken cancellationToken = default) {
+
+            MemoryStream buffer = _rmsMgr.GetStream();
+
+            // Created against the buffer, so the offsets it records are 0-based and
+            // meaningless until EmitAsync fixes them up. Everything else it sets
+            // (codec, type, path, encodings) is position-independent.
             // Num_values in the chunk does include null values - I have validated this by dumping spark-generated file.
             ColumnChunk chunk = _footer.CreateColumnChunk(
-                _compressionMethod, _stream, _schemaElement.Type!.Value, fullPath, column.NumValues,
+                _compressionMethod, buffer, _schemaElement.Type!.Value, fullPath, column.NumValues,
                 _keyValueMetadata);
 
             ColumnSizes columnSizes = await WriteColumnAsync(
-                chunk, column, _schemaElement,
+                buffer, chunk, column, _schemaElement,
                 cancellationToken);
             //generate stats for column chunk
             chunk.MetaData!.Statistics = column.Statistics.ToThriftStatistics(_schemaElement);
@@ -59,7 +92,24 @@ namespace Parquet.File {
             chunk.MetaData.TotalCompressedSize = columnSizes.CompressedSize;
             chunk.MetaData.TotalUncompressedSize = columnSizes.UncompressedSize;
 
-            return chunk;
+            buffer.Position = 0;
+            return new PreparedColumn { Chunk = chunk, Buffer = buffer };
+        }
+
+        /// <summary>
+        /// Append a prepared column chunk to the output stream. MUST run sequentially and
+        /// in schema order: parquet records each chunk's absolute byte offset, so the
+        /// position is only knowable at append time.
+        /// </summary>
+        internal async Task<ColumnChunk> EmitAsync(
+            PreparedColumn prepared,
+            CancellationToken cancellationToken = default) {
+
+            long startPos = _stream.Position;
+            prepared.Chunk.FileOffset = startPos;
+            prepared.Chunk.MetaData!.DataPageOffset = startPos;
+            await prepared.Buffer.CopyToAsync(_stream, 81920, cancellationToken);
+            return prepared.Chunk;
         }
 
         class ColumnSizes {
@@ -68,14 +118,15 @@ namespace Parquet.File {
         }
 
         private async Task CompressAndWriteAsync(
+            Stream target,
             PageHeader ph, MemoryStream data,
             ColumnSizes cs,
             CancellationToken cancellationToken) {
-            
+
             using IronCompress.IronCompressResult compressedData = _compressionMethod == CompressionMethod.None
                 ? new IronCompress.IronCompressResult(data.ToArray(), Codec.Snappy, false)
                 : Compressor.Compress(_compressionMethod, data.ToArray(), _compressionLevel);
-            
+
             ph.UncompressedPageSize = (int)data.Length;
             ph.CompressedPageSize = compressedData.AsSpan().Length;
 
@@ -84,12 +135,12 @@ namespace Parquet.File {
             ph.Write(new Meta.Proto.ThriftCompactProtocolWriter(headerMs));
             int headerSize = (int)headerMs.Length;
             headerMs.Position = 0;
-            _stream.Flush();
+            target.Flush();
 
-            await headerMs.CopyToAsync(_stream);
+            await headerMs.CopyToAsync(target, 81920, cancellationToken);
 
             // write data
-            _stream.WriteSpan(compressedData);
+            target.WriteSpan(compressedData);
 
             cs.CompressedSize += headerSize;
             cs.UncompressedSize += headerSize;
@@ -98,7 +149,7 @@ namespace Parquet.File {
             cs.UncompressedSize += ph.UncompressedPageSize;
         }
 
-        private async Task<ColumnSizes> WriteColumnAsync(ColumnChunk chunk, DataColumn column,
+        private async Task<ColumnSizes> WriteColumnAsync(Stream target, ColumnChunk chunk, DataColumn column,
            SchemaElement tse,
            CancellationToken cancellationToken = default) {
 
@@ -123,7 +174,7 @@ namespace Parquet.File {
                        tse,
                        ms, column.Statistics);
 
-                await CompressAndWriteAsync(ph, ms, r, cancellationToken);
+                await CompressAndWriteAsync(target, ph, ms, r, cancellationToken);
             }
 
             // data page
@@ -155,7 +206,7 @@ namespace Parquet.File {
                 }
 
                 ph.DataPageHeader!.Statistics = column.Statistics.ToThriftStatistics(tse);
-                await CompressAndWriteAsync(ph, ms, r, cancellationToken);
+                await CompressAndWriteAsync(target, ph, ms, r, cancellationToken);
             }
 
             return r;
