@@ -13,7 +13,9 @@ files, in two independent groups:
 
 * `src/Parquet/ParquetRowGroupWriter.cs` - the new public `WriteColumnsAsync` API
 * `src/Parquet/File/DataColumnWriter.cs` - the Prepare/Emit split it needs
-* `src/Parquet/File/Compressor.cs` - `ThreadLocal<Iron>` (determinism)
+* `src/Parquet/File/Compressor.cs` - `ThreadLocal<Iron>`, a MISTAKEN determinism
+  fix retained as a thread-safety precaution (see below - do not repeat its
+  original rationale)
 * `src/Parquet/Encodings/ParquetPlainEncoder.cs` - bool-encoder garbage byte
   (determinism)
 
@@ -118,22 +120,30 @@ stays strictly ordered and single-threaded; only Prepare runs under
 `Parallel.For`. A failed Prepare disposes the prepared columns that did complete,
 or a failed write would leak the whole row group's pooled buffers.
 
-### Two determinism bugs this exposed
+### The determinism bug this exposed - and one wrong turn on the way
 
-Parallelising the compression made the output non-reproducible. Both causes were
-pre-existing upstream defects that single-threaded execution had been hiding.
+Parallelising the compression made the output non-reproducible: three runs over the
+same input produced three different files, sizes differing by a few bytes on small,
+highly-compressible chunks. Decompressed values were identical every time, but
+parquet output has to be reproducible - it is what the regression goldens compare.
 
-**1. `Compressor` shared one `Iron` instance across all threads.** `Iron` holds
-codec state, so the compressed bytes depended on how concurrent calls interleaved:
-three runs over the same input produced three different files, sizes differing by
-a few bytes on small, highly-compressible chunks. Decompressed values were
-identical every time - but parquet output has to be reproducible. Fixed with
-`ThreadLocal<Iron>`, one allocation per worker.
+**The wrong turn: `ThreadLocal<Iron>`.** The first hypothesis was that `Compressor`
+sharing one `Iron` across threads carried codec state between them. `Compressor.cs`
+was changed to `ThreadLocal<Iron>` - and it **did not fix anything**. The commit that
+introduced it (915984a) says so in its own message: "Making Iron thread-local did NOT
+fix it." It was never reverted, and for a while both the code comment and this file
+described it as the determinism fix. It is not one.
 
-This also makes `Compressor.Decompress` thread-safe, which any future parallel
-READ path needs.
+What it is now: a cheap thread-safety precaution, since IronCompress makes no
+documented thread-safety guarantee and `Compress` now runs concurrently. It costs one
+allocation per worker thread. **Do not report it upstream as a parquet-dotnet bug** -
+there is no evidence of one. Note it also routes `Decompress` through the ThreadLocal,
+so it touches the READ path of a binary Skyline ships, and the `ThreadLocal` is never
+disposed. Reverting it is a live option (see "Open question" below).
 
-**2. `ParquetPlainEncoder.Encode(ReadOnlySpan<bool>, ...)` wrote an uninitialised
+**The actual cause** was ours, not upstream's codec.
+
+**`ParquetPlainEncoder.Encode(ReadOnlySpan<bool>, ...)` wrote an uninitialised
 byte.** `targetLength` was `(data.Length / 8) + 1`, which over-counts by a whole
 byte when the length is a multiple of 8. That extra byte was never written by the
 packing loop - it only stores the buffer slot when a PARTIAL byte is left over -
@@ -146,11 +156,28 @@ the pool's reuse pattern is deterministic single-threaded (which is why goldens
 were stable) and NOT across threads. Fixed to `(data.Length + 7) / 8`.
 
 Found by noticing that `is_decoy` - the only bool column - was the only column
-whose compressed size varied run to run.
+whose compressed size varied run to run. Fixing it made the output reproducible:
+932ade5 verified sequential and two parallel runs all producing sha 87E505583C14.
 
 **Consequence for consumers:** bool column pages whose row count is a multiple of
 8 lose a trailing garbage byte. Byte-for-byte output changes; decoded values do
 not. Anything asserting on parquet BYTES (rather than values) will see a diff.
+
+### Open question: keep or revert `ThreadLocal<Iron>`?
+
+Unresolved, and it is a judgement call rather than a missing measurement.
+
+* **Keep** - zero rebuild, and the binary the 82-file benchmark measured stays the
+  one being shipped. Cost: an undocumented-in-upstream-terms change to the
+  decompression path of a DLL Skyline ships, plus a `ThreadLocal` that is never
+  disposed and so retains one `Iron` per thread that ever touches it.
+* **Revert** - smaller divergence, and nothing in the record shows it does any good.
+  Cost: a fork rebuild, a re-stage into pwiz, and a re-run of the Astral gate; and
+  the shipped binary would then no longer be the one the benchmark measured.
+
+There is no evidence either way on whether `Iron` is safe to share across threads -
+only evidence that sharing it was NOT the cause of the byte drift. Reverting is
+therefore not provably safe, merely smaller. Decide deliberately.
 
 ## Consuming the fork from pwiz
 
@@ -196,11 +223,13 @@ regression test in `src/Parquet.Test/ThriftTest.cs`.
 
 Not upstreamed:
 * the `Parquet.csproj` `<LangVersion>12</LangVersion>` pin - local build artifact
-* the parallel-write work - not yet offered upstream. The two determinism fixes
-  inside it (`ThreadLocal<Iron>`, the bool-encoder byte count) ARE upstream bugs
-  in their own right and are worth filing separately from the API addition; the
-  bool one writes uninitialised heap into every affected page regardless of
-  threading.
+* the parallel-write work - not yet offered upstream. The **bool-encoder byte
+  count** IS a genuine upstream bug in its own right and is worth filing separately
+  from the API addition: it writes uninitialised heap into every affected page
+  regardless of threading. (Upstream 6.1.0 already carries the same fix
+  independently, so check before filing.)
+* the `ThreadLocal<Iron>` change is **NOT** an upstream bug report. See above - it
+  fixed nothing and is kept only as a precaution.
 
 **Retiring the fork is no longer just "wait for #747".** When #747 lands, the
 struct-skip reason goes away, but `WriteColumnsAsync` does not exist upstream, so
