@@ -1,12 +1,24 @@
 # Patch notes
 
-This fork diverges from upstream `aloneguid/parquet-dotnet` 4.25.0 by exactly
-two files:
+This fork diverges from upstream `aloneguid/parquet-dotnet` 4.25.0 in five source
+files, in two independent groups:
 
-* `src/Parquet/Meta/Proto/ThriftCompactProtocolReader.cs` — the substantive fix
-* `src/Parquet/Parquet.csproj` — `<LangVersion>` pin to dodge a build break on
+**Group 1 - the struct-skip correctness fix** (the original reason for the fork):
+
+* `src/Parquet/Meta/Proto/ThriftCompactProtocolReader.cs` - the substantive fix
+* `src/Parquet/Parquet.csproj` - `<LangVersion>` pin to dodge a build break on
   newer .NET SDKs
 
+**Group 2 - parallel column compression on write** (added 2026-09-09):
+
+* `src/Parquet/ParquetRowGroupWriter.cs` - the new public `WriteColumnsAsync` API
+* `src/Parquet/File/DataColumnWriter.cs` - the Prepare/Emit split it needs
+* `src/Parquet/File/Compressor.cs` - `ThreadLocal<Iron>` (determinism)
+* `src/Parquet/Encodings/ParquetPlainEncoder.cs` - bool-encoder garbage byte
+  (determinism)
+
+Group 2 ADDS PUBLIC API, which Group 1 did not. That has a build consequence in
+pwiz - see "Consuming the fork from pwiz" at the end.
 ## ThriftCompactProtocolReader: struct-skip fix + Double/Uuid cases
 
 ### Bug
@@ -75,25 +87,131 @@ C# 14 turns `field` into a contextual keyword, which breaks the existing
 `StructField.cs` member named `field`. Pinning to `<LangVersion>12</LangVersion>`
 keeps the upstream sources buildable without touching the field names.
 
+
+## Parallel column compression on write
+
+### Why
+
+Osprey writes ~164 GB of parquet in an 82-file SEA-AD run and the write was
+single-threaded: `ParquetRowGroupWriter` compressed and emitted one column at a
+time. Compression is the cost and the columns of a row group are independent, so
+it parallelises cleanly - but only if the file bytes stay identical, because the
+Osprey regression goldens compare output.
+
+### The API
+
+```csharp
+public async Task WriteColumnsAsync(IReadOnlyList<DataColumn> columns,
+    Dictionary<string, string>? customMetadata = null,
+    int maxDegreeOfParallelism = 0,
+    CancellationToken cancellationToken = default)
+```
+
+`maxDegreeOfParallelism` 0 means `Environment.ProcessorCount`; 1 forces the
+sequential loop *through the same code path*, which is how the A/B against the
+golden is taken. `WriteColumnAsync` is untouched.
+
+`DataColumnWriter` is split into `PrepareAsync` (encode + compress into a
+`MemoryStream`, no I/O, safe to run concurrently) and `EmitAsync` (append to the
+output stream). Parquet records each chunk's ABSOLUTE offset, so the emit loop
+stays strictly ordered and single-threaded; only Prepare runs under
+`Parallel.For`. A failed Prepare disposes the prepared columns that did complete,
+or a failed write would leak the whole row group's pooled buffers.
+
+### Two determinism bugs this exposed
+
+Parallelising the compression made the output non-reproducible. Both causes were
+pre-existing upstream defects that single-threaded execution had been hiding.
+
+**1. `Compressor` shared one `Iron` instance across all threads.** `Iron` holds
+codec state, so the compressed bytes depended on how concurrent calls interleaved:
+three runs over the same input produced three different files, sizes differing by
+a few bytes on small, highly-compressible chunks. Decompressed values were
+identical every time - but parquet output has to be reproducible. Fixed with
+`ThreadLocal<Iron>`, one allocation per worker.
+
+This also makes `Compressor.Decompress` thread-safe, which any future parallel
+READ path needs.
+
+**2. `ParquetPlainEncoder.Encode(ReadOnlySpan<bool>, ...)` wrote an uninitialised
+byte.** `targetLength` was `(data.Length / 8) + 1`, which over-counts by a whole
+byte when the length is a multiple of 8. That extra byte was never written by the
+packing loop - it only stores the buffer slot when a PARTIAL byte is left over -
+and `ArrayPool.Rent()` returns uncleared memory, so the trailing byte in every
+such bool page was whatever the pool happened to hold.
+
+Readers ignore bits past the value count, so the data always round-tripped and
+the bug stayed invisible. But it is uninitialised heap written into the file, and
+the pool's reuse pattern is deterministic single-threaded (which is why goldens
+were stable) and NOT across threads. Fixed to `(data.Length + 7) / 8`.
+
+Found by noticing that `is_decoy` - the only bool column - was the only column
+whose compressed size varied run to run.
+
+**Consequence for consumers:** bool column pages whose row count is a multiple of
+8 lose a trailing garbage byte. Byte-for-byte output changes; decoded values do
+not. Anything asserting on parquet BYTES (rather than values) will see a diff.
+
+## Consuming the fork from pwiz
+
+`pwiz_tools/Osprey/Directory.Build.targets` has an `OverridePatchedParquetNet`
+target that copies `pwiz_tools/Shared/Lib/Parquet/ParquetNet.dll` over the
+NuGet-resolved `Parquet.dll` in the output directory AFTER build. That is enough
+for a patch that only changes BEHAVIOUR - the compiler binds against the stock
+4.25.0 reference assembly and the fork's binary answers at run time.
+
+It is NOT enough once the fork ADDS public API. `WriteColumnsAsync` does not exist
+on the stock reference assembly, so `Osprey.IO` failed to compile with CS1061 even
+though the right binary was in the output. `Osprey.IO.csproj` therefore does both:
+
+```xml
+<PackageReference Include="Parquet.Net" Version="4.25.0" ExcludeAssets="compile" />
+<Reference Include="Parquet">
+  <HintPath>..\..\Shared\Lib\Parquet\ParquetNet.dll</HintPath>
+</Reference>
+```
+
+`ExcludeAssets="compile"` keeps the package for its transitive dependencies
+(IronCompress and friends) while removing its reference assembly from the compile
+closure; the direct `<Reference>` then supplies the fork's surface at compile time
+as well as run time. This is the same shape `Skyline.csproj` already used.
+
+**Ship the `netstandard2.0` build.** Skyline is still net472 and references the
+same `Shared/Lib/Parquet/ParquetNet.dll` directly, so one binary serves both. A
+net8.0-only build would break Skyline.
+
+Rebuild and stage with the commands in the "Rebuilding the fork" section of the
+Osprey handoff notes - a `Release` build of `src/Parquet/Parquet.csproj` pinned to
+`-p:Version=4.25.0-osprey2 -p:FileVersion=4.25.0 -p:AssemblyVersion=4.0.0`, then
+copy `src/Parquet/bin/Release/netstandard2.0/Parquet.dll` to BOTH
+`<pwiz>\pwiz_tools\Shared\Lib\Parquet\ParquetNet.dll` and
+`BinariesForProteoWizard\ParquetNet.dll`.
+
 ## Upstream PR
 
-Filed as **[aloneguid/parquet-dotnet#747](https://github.com/aloneguid/parquet-dotnet/pull/747)**
-on 2026-05-07. The maintainer closed it the same day without comment; as of
-2026-09-18 upstream `master` still has the empty struct-skip loop, so the patch
-stays on this fork.
+The struct-skip fix is filed as
+**[aloneguid/parquet-dotnet#747](https://github.com/aloneguid/parquet-dotnet/pull/747)**
+(2026-05-07). Scope is the `ThriftCompactProtocolReader` change plus a focused
+regression test in `src/Parquet.Test/ThriftTest.cs`.
 
-Scope of the upstream PR is the `ThriftCompactProtocolReader` change plus a
-focused regression test in `src/Parquet.Test/ThriftTest.cs`. The
-`Parquet.csproj` `<LangVersion>12</LangVersion>` pin is local-only (an
-artifact of building under .NET 10 SDK, which resolves `latest` to C# 14
-where `field` becomes a contextual keyword and breaks `StructField.cs`)
-and is not upstreamed.
+Not upstreamed:
+* the `Parquet.csproj` `<LangVersion>12</LangVersion>` pin - local build artifact
+* the parallel-write work - not yet offered upstream. The two determinism fixes
+  inside it (`ThreadLocal<Iron>`, the bool-encoder byte count) ARE upstream bugs
+  in their own right and are worth filing separately from the API addition; the
+  bool one writes uninitialised heap into every affected page regardless of
+  threading.
 
-Once #747 lands and a release ships:
+**Retiring the fork is no longer just "wait for #747".** When #747 lands, the
+struct-skip reason goes away, but `WriteColumnsAsync` does not exist upstream, so
+moving to a stock release means either upstreaming the parallel write or giving it
+up. Track those as two separate decisions.
 
-  * bump `pwiz_tools/Shared/Lib/Parquet/ParquetNet.dll` in pwiz to the stock
-    upstream NuGet release
-  * delete `pwiz_tools/OspreySharp/Directory.Build.targets`'s
-    `OverridePatchedParquetNet` target (no longer needed)
-  * retire this branch (keep it, or a tag, as the reproducible record of
-    what the shipped `ParquetNet.dll` was built from)
+If both are ever resolved upstream:
+
+  * bump `pwiz_tools/Shared/Lib/Parquet/ParquetNet.dll` to the stock upstream release
+  * revert `Osprey.IO.csproj` to a plain `<PackageReference>` (drop
+    `ExcludeAssets="compile"` and the direct `<Reference>`)
+  * delete the `OverridePatchedParquetNet` target in
+    `pwiz_tools/Osprey/Directory.Build.targets`
+  * archive or delete this fork
