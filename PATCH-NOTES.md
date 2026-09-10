@@ -1,6 +1,6 @@
 # Patch notes
 
-This fork diverges from upstream `aloneguid/parquet-dotnet` 4.25.0 in five source
+This fork diverges from upstream `aloneguid/parquet-dotnet` 4.25.0 in four source
 files, in two independent groups:
 
 **Group 1 - the struct-skip correctness fix** (the original reason for the fork):
@@ -13,11 +13,11 @@ files, in two independent groups:
 
 * `src/Parquet/ParquetRowGroupWriter.cs` - the new public `WriteColumnsAsync` API
 * `src/Parquet/File/DataColumnWriter.cs` - the Prepare/Emit split it needs
-* `src/Parquet/File/Compressor.cs` - `ThreadLocal<Iron>`, a MISTAKEN determinism
-  fix retained as a thread-safety precaution (see below - do not repeat its
-  original rationale)
-* `src/Parquet/Encodings/ParquetPlainEncoder.cs` - bool-encoder garbage byte
-  (determinism)
+* `src/Parquet/Encodings/ParquetPlainEncoder.cs` - bool-encoder garbage byte; this
+  is the actual determinism fix
+
+`src/Parquet/File/Compressor.cs` was a FIFTH divergence and has been REVERTED to
+the pristine 4.25.0 import - see "The determinism bug this exposed" below.
 
 Group 2 ADDS PUBLIC API, which Group 1 did not. That has a build consequence in
 pwiz - see "Consuming the fork from pwiz" at the end.
@@ -127,19 +127,29 @@ same input produced three different files, sizes differing by a few bytes on sma
 highly-compressible chunks. Decompressed values were identical every time, but
 parquet output has to be reproducible - it is what the regression goldens compare.
 
-**The wrong turn: `ThreadLocal<Iron>`.** The first hypothesis was that `Compressor`
-sharing one `Iron` across threads carried codec state between them. `Compressor.cs`
-was changed to `ThreadLocal<Iron>` - and it **did not fix anything**. The commit that
-introduced it (915984a) says so in its own message: "Making Iron thread-local did NOT
-fix it." It was never reverted, and for a while both the code comment and this file
-described it as the determinism fix. It is not one.
+**The wrong turn: `ThreadLocal<Iron>` - now REVERTED.** The first hypothesis was that
+`Compressor` sharing one `Iron` across threads carried codec state between them.
+`Compressor.cs` was changed to `ThreadLocal<Iron>` and it **did not fix anything**.
+The commit that introduced it (915984a) says so in its own message: "Making Iron
+thread-local did NOT fix it." The same session then disproved the premise
+directly: a standalone test compressed 40 realistic buffers sequentially vs under
+`Parallel.For`, with a shared `Iron` AND with per-thread instances - **0 mismatches
+either way**. zstd is deterministic under concurrency.
 
-What it is now: a cheap thread-safety precaution, since IronCompress makes no
-documented thread-safety guarantee and `Compress` now runs concurrently. It costs one
-allocation per worker thread. **Do not report it upstream as a parquet-dotnet bug** -
-there is no evidence of one. Note it also routes `Decompress` through the ThreadLocal,
-so it touches the READ path of a binary Skyline ships, and the `ThreadLocal` is never
-disposed. Reverting it is a live option (see "Open question" below).
+It was nevertheless left in the tree, and for a while both the code comment and
+this file described it as the determinism fix. **It has now been reverted** (2026-09-10)
+by restoring `Compressor.cs` from the pristine 4.25.0 import, so the file is no
+longer a fork divergence at all. Reasons:
+
+* it rested on a premise disproven twice - by its own commit message and by that
+  40-buffer experiment;
+* it also rewrote `Decompress`, so it altered the READ path of a binary Skyline
+  ships, for no demonstrated benefit;
+* the `ThreadLocal` was never disposed, retaining one `Iron` per thread that ever
+  touched it for the process lifetime.
+
+Do NOT reintroduce it, and do not report it upstream - there is no parquet-dotnet
+bug here.
 
 **The actual cause** was ours, not upstream's codec.
 
@@ -163,32 +173,15 @@ whose compressed size varied run to run. Fixing it made the output reproducible:
 8 lose a trailing garbage byte. Byte-for-byte output changes; decoded values do
 not. Anything asserting on parquet BYTES (rather than values) will see a diff.
 
-### Open question: keep or revert `ThreadLocal<Iron>`?
+### Resolved 2026-09-10: `ThreadLocal<Iron>` was reverted
 
-Unresolved, and it is a judgement call rather than a missing measurement.
+Brendan called it: no unproven changes. `Compressor.cs` was restored from the
+pristine 4.25.0 import, so it is no longer a fork file at all. The parallel write
+remains deterministic without it, which is the point - the bool-encoder fix was
+always what made it so.
 
-* **Keep** - zero rebuild, and the binary the 82-file benchmark measured stays the
-  one being shipped. Cost: an undocumented-in-upstream-terms change to the
-  decompression path of a DLL Skyline ships, plus a `ThreadLocal` that is never
-  disposed and so retains one `Iron` per thread that ever touches it.
-* **Revert** - smaller divergence, and nothing in the record shows it does any good.
-  Cost: a fork rebuild, a re-stage into pwiz, and a re-run of the Astral gate; and
-  the shipped binary would then no longer be the one the benchmark measured.
-
-**Correction to an earlier draft of this section:** it said there was "no evidence
-either way" on sharing `Iron` across threads. That was wrong - the investigating
-session had already tested it. A standalone test compressed 40 realistic buffers
-sequentially vs under `Parallel.For`, with a shared `Iron` AND with per-thread
-instances: **0 mismatches either way**; zstd is deterministic under concurrency
-(see "What was ruled out along the way" in
-TODO-20260909_osprey_parallel_parquet_write.md).
-
-So the balance is not neutral. `ThreadLocal<Iron>` is an unproven change resting on
-a premise that was disproven twice - once by the commit that added it and once by
-that experiment - and it alters the decompression path of a binary Skyline ships.
-The better-supported option is to REVERT it. The only real cost is that the shipped
-binary would then no longer be the one the 82-file benchmark measured, so the
-Astral gate would need re-running.
+Re-verified after the revert: the fork rebuilt, was re-staged into pwiz, and
+`regression.ps1 -Dataset Astral` was re-run. See the TODO for the result.
 
 ## Consuming the fork from pwiz
 
