@@ -175,9 +175,20 @@ Unresolved, and it is a judgement call rather than a missing measurement.
   Cost: a fork rebuild, a re-stage into pwiz, and a re-run of the Astral gate; and
   the shipped binary would then no longer be the one the benchmark measured.
 
-There is no evidence either way on whether `Iron` is safe to share across threads -
-only evidence that sharing it was NOT the cause of the byte drift. Reverting is
-therefore not provably safe, merely smaller. Decide deliberately.
+**Correction to an earlier draft of this section:** it said there was "no evidence
+either way" on sharing `Iron` across threads. That was wrong - the investigating
+session had already tested it. A standalone test compressed 40 realistic buffers
+sequentially vs under `Parallel.For`, with a shared `Iron` AND with per-thread
+instances: **0 mismatches either way**; zstd is deterministic under concurrency
+(see "What was ruled out along the way" in
+TODO-20260909_osprey_parallel_parquet_write.md).
+
+So the balance is not neutral. `ThreadLocal<Iron>` is an unproven change resting on
+a premise that was disproven twice - once by the commit that added it and once by
+that experiment - and it alters the decompression path of a binary Skyline ships.
+The better-supported option is to REVERT it. The only real cost is that the shipped
+binary would then no longer be the one the 82-file benchmark measured, so the
+Astral gate would need re-running.
 
 ## Consuming the fork from pwiz
 
@@ -223,11 +234,15 @@ regression test in `src/Parquet.Test/ThriftTest.cs`.
 
 Not upstreamed:
 * the `Parquet.csproj` `<LangVersion>12</LangVersion>` pin - local build artifact
-* the parallel-write work - not yet offered upstream. The **bool-encoder byte
-  count** IS a genuine upstream bug in its own right and is worth filing separately
-  from the API addition: it writes uninitialised heap into every affected page
-  regardless of threading. (Upstream 6.1.0 already carries the same fix
-  independently, so check before filing.)
+* the parallel-write API (`WriteColumnsAsync`) - not offered upstream.
+* the **bool-encoder byte count** - **there is nothing to upstream.** Upstream
+  6.1.0 already has exactly `(data.Length + 7) / 8`, and its SIMD path
+  (`EncodeHwx`, on by default via `ParquetOptions.UseHardwareAcceleration`) writes
+  computed bytes straight to the stream with no rented buffer, so it is clean too.
+  That was verified by inspecting 6.1.0, not assumed - see "The bug this uncovered"
+  in TODO-20260909_osprey_parallel_parquet_write.md. Do NOT open an issue for it.
+  It is instead a concrete measured argument FOR the 6.1.0 upgrade: parallel
+  parquet writing is safe there and provably is not on 4.25.0.
 * the `ThreadLocal<Iron>` change is **NOT** an upstream bug report. See above - it
   fixed nothing and is kept only as a precaution.
 

@@ -15,11 +15,17 @@ namespace Parquet.File {
         // ArrayPool rental, fixed one commit later in 932ade5, which is what actually made
         // the output reproducible (sequential and two parallel runs all sha 87E505583C14).
         //
-        // It was never reverted. It is retained ONLY as a cheap thread-safety precaution
-        // now that Compress runs concurrently - IronCompress makes no documented
-        // thread-safety guarantee - and it costs one allocation per worker thread. It is
-        // NOT a determinism fix and must not be described as one, and it is NOT an
-        // upstream parquet-dotnet bug to report.
+        // It was never reverted, and the evidence against it is stronger than just that
+        // commit message: the investigating session ALSO ran a standalone test compressing
+        // 40 realistic buffers sequentially vs under Parallel.For, with a shared Iron AND
+        // with per-thread instances - 0 mismatches either way. zstd is deterministic under
+        // concurrency. See "What was ruled out along the way" in
+        // TODO-20260909_osprey_parallel_parquet_write.md.
+        //
+        // So this is an UNPROVEN change kept on a disproven premise. It is NOT a
+        // determinism fix, must not be described as one, and is NOT an upstream
+        // parquet-dotnet bug to report. Reverting it is the better-supported option; the
+        // only cost is that the shipped binary would no longer be the one benchmarked.
         //
         // Note this also routes Decompress through the ThreadLocal, so it touches the READ
         // path of a binary Skyline ships. Reverting it is a live option; see PATCH-NOTES.
