@@ -151,42 +151,29 @@ namespace Parquet {
             int dop = maxDegreeOfParallelism > 0 ? maxDegreeOfParallelism : Environment.ProcessorCount;
             dop = Math.Min(dop, columns.Count);
 
-            if(dop <= 1) {
-                // Strictly sequential, in order: identical to calling WriteColumnAsync per
-                // column, including the order in which the shared compressor sees pages.
-                for(int i = 0; i < columns.Count; i++) {
-                    using(DataColumnWriter.PreparedColumn p =
-                        await writers[i].PrepareAsync(paths[i], columns[i], cancellationToken)) {
-                        _owGroup.Columns.Add(await writers[i].EmitAsync(p, cancellationToken));
-                    }
-                }
-                return;
-            }
-
+            // Both branches run the SAME PrepareAsync per column and differ only in the loop,
+            // so a sequential-vs-parallel comparison isolates concurrency and nothing else.
+            // PrepareAsync does no real I/O (it writes to a MemoryStream), so blocking on it
+            // here costs nothing and keeps Task scheduling out of the picture.
             var prepared = new DataColumnWriter.PreparedColumn[columns.Count];
-            using(var gate = new SemaphoreSlim(dop, dop)) {
-                var tasks = new Task[columns.Count];
-                for(int i = 0; i < columns.Count; i++) {
-                    int idx = i;
-                    tasks[idx] = Task.Run(async () => {
-                        await gate.WaitAsync(cancellationToken);
-                        try {
-                            prepared[idx] = await writers[idx].PrepareAsync(
-                                paths[idx], columns[idx], cancellationToken);
-                        } finally {
-                            gate.Release();
-                        }
-                    }, cancellationToken);
+            try {
+                if(dop <= 1) {
+                    for(int i = 0; i < columns.Count; i++)
+                        prepared[i] = PrepareOne(writers, paths, columns, i, cancellationToken);
+                } else {
+                    var po = new ParallelOptions {
+                        MaxDegreeOfParallelism = dop,
+                        CancellationToken = cancellationToken
+                    };
+                    Parallel.For(0, columns.Count, po,
+                        i => prepared[i] = PrepareOne(writers, paths, columns, i, cancellationToken));
                 }
-                try {
-                    await Task.WhenAll(tasks);
-                } catch {
-                    // Whatever did complete still owns pooled buffers; release them before
-                    // the exception leaves, or a failed write leaks the whole row group.
-                    foreach(DataColumnWriter.PreparedColumn p in prepared)
-                        p?.Dispose();
-                    throw;
-                }
+            } catch {
+                // Whatever did complete still owns pooled buffers; release them before the
+                // exception leaves, or a failed write leaks the whole row group.
+                foreach(DataColumnWriter.PreparedColumn p in prepared)
+                    p?.Dispose();
+                throw;
             }
 
             // Ordered append: parquet records each chunk's absolute offset, so this cannot
@@ -197,6 +184,13 @@ namespace Parquet {
                     _owGroup.Columns.Add(chunk);
                 }
             }
+        }
+
+        private static DataColumnWriter.PreparedColumn PrepareOne(
+            DataColumnWriter[] writers, FieldPath[] paths, IReadOnlyList<DataColumn> columns,
+            int i, CancellationToken cancellationToken) {
+            return writers[i].PrepareAsync(paths[i], columns[i], cancellationToken)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
         }
 
         /// <summary>

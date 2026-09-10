@@ -439,7 +439,19 @@ namespace Parquet.Encodings {
         #endregion
 
         public static void Encode(ReadOnlySpan<bool> data, Stream destination) {
-            int targetLength = (data.Length / 8) + 1;
+            // Patch (osprey): ceil, not floor+1. The old (len / 8) + 1 over-counted by a
+            // whole byte whenever len was a multiple of 8 - and that extra byte was never
+            // written, because the packing loop only stores buffer[ib] when a PARTIAL byte
+            // is left over (n != 0). Rent() hands back uncleared memory, so the trailing
+            // byte written to the file was whatever the pool happened to hold.
+            //
+            // Readers ignore bits past the value count, so data round-trips correctly and
+            // this stayed invisible. It is still uninitialised heap being written into every
+            // bool page, and it makes output NON-REPRODUCIBLE as soon as pages are encoded
+            // concurrently: the pool's reuse pattern is deterministic single-threaded (which
+            // is why goldens were stable) but not across threads. Found via is_decoy, the
+            // only bool column, being the only one whose compressed size varied run to run.
+            int targetLength = (data.Length + 7) / 8;
             byte[] buffer = ArrayPool<byte>.Shared.Rent(targetLength);
 
             int n = 0;
