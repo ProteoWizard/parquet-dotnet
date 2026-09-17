@@ -183,6 +183,55 @@ always what made it so.
 Re-verified after the revert: the fork rebuilt, was re-staged into pwiz, and
 `regression.ps1 -Dataset Astral` was re-run. See the TODO for the result.
 
+### 2026-09-17: a SECOND parallel-write bug, in the narrow-integer encoders
+
+The bool fix made parallel output deterministic, but it did not make it correct.
+`ParquetPlainEncoder` widens `byte`, `sbyte`, `short` and `ushort` columns into a rented
+`int[]` before encoding, and it **returns the buffer to the pool and then reads it**:
+
+```csharp
+int[] ints = ArrayPool<int>.Shared.Rent(data.Length);
+try {
+    for(int i = 0; i < data.Length; i++) ints[i] = data[i];
+} finally {
+    ArrayPool<int>.Shared.Return(ints);          // returned here...
+}
+Encode(ints.AsSpan(0, data.Length), destination); // ...then READ after return
+```
+
+Single-threaded this is benign: nothing rents between the return and the read, so the
+contents survive, which is why it has been latent for years. **Once columns encode
+concurrently another thread rents that same array and overwrites it mid-encode, and the
+column silently writes the other thread's data.**
+
+**Measured**, on OspreySharp's byte-typed `charge` column, 20,000 write/read round-trips of
+the same 7-row fixture per arm:
+
+| arm | corrupted round-trips |
+|---|---|
+| parallel (`WriteColumnsAsync`, default DOP) | **27 / 20,000** |
+| serialized (`maxDegreeOfParallelism = 1`) | 0 / 20,000 |
+| parallel, after this patch | 0 / 20,000 |
+
+It surfaced as a ~2% intermittent failure across four Osprey unit tests, always as a scalar
+read back as its default - and because `charge` is part of the
+`(entry_id, charge, scan_number)` identity, a corrupted value does not merely lose a field:
+it makes the row fail identity matching downstream, silently dropping survivor rows.
+
+**Fix**: encode inside the `try`, before the buffer goes back to the pool. All four
+overloads.
+
+**Upstream disposition - UNLIKE the bool bug, this one IS worth reporting.** Verified by
+fetching the source, not assumed: the identical code is present in upstream `master` AND in
+`6.1.0` (`ParquetPlainEncoder.cs:580`), and there is no hardware-accelerated bypass for
+these types - `EncodeHwx` exists only for `bool`, and the byte path calls the buggy method
+directly.
+
+**This corrects the 6.1.0 argument recorded above.** "Parallel parquet writing is safe on
+6.1.0" was established for the *bool* encoder only. It is NOT safe there for byte, sbyte,
+short or ushort columns. Upgrading to 6.1.0 would not have saved us from this, and any
+future upgrade must carry this patch until upstream takes it.
+
 ## Consuming the fork from pwiz
 
 `pwiz_tools/Osprey/Directory.Build.targets` has an `OverridePatchedParquetNet`

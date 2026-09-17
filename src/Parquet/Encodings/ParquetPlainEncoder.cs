@@ -502,16 +502,23 @@ namespace Parquet.Encodings {
 
         public static void Encode(ReadOnlySpan<byte> data, Stream destination, SchemaElement tse) {
 
-            // copy shorts into ints
+            // PATCHED (see PATCH-NOTES.md): the widening buffer is now encoded INSIDE the try,
+            // before it goes back to the pool. Upstream returns it in the finally and then reads
+            // it - a use-after-return. Single-threaded nothing rents in between, so the contents
+            // happen to survive and the bug is invisible; once columns encode concurrently
+            // another thread rents the same array and overwrites it mid-encode, and the column
+            // silently writes the other thread's data. Measured on OspreySharp's byte-typed
+            // `charge` column: 27 of 20,000 round-trips came back wrong with parallel writes,
+            // 0 of 20,000 with them serialized.
             int[] ints = ArrayPool<int>.Shared.Rent(data.Length);
             try {
                 for(int i = 0; i < data.Length; i++)
                     ints[i] = data[i];
+
+                Encode(ints.AsSpan(0, data.Length), destination);
             } finally {
                 ArrayPool<int>.Shared.Return(ints);
             }
-
-            Encode(ints.AsSpan(0, data.Length), destination);
         }
 
         public static int Decode(Span<byte> source, Span<byte> data) {
@@ -524,16 +531,16 @@ namespace Parquet.Encodings {
 
         public static void Encode(ReadOnlySpan<sbyte> data, Stream destination) {
 
-            // copy shorts into ints
+            // PATCHED: same use-after-return as the byte overload above.
             int[] ints = ArrayPool<int>.Shared.Rent(data.Length);
             try {
                 for(int i = 0; i < data.Length; i++)
                     ints[i] = data[i];
+
+                Encode(ints.AsSpan(0, data.Length), destination);
             } finally {
                 ArrayPool<int>.Shared.Return(ints);
             }
-
-            Encode(ints.AsSpan(0, data.Length), destination);
         }
 
         public static int Decode(Span<byte> source, Span<sbyte> data) {
@@ -550,16 +557,16 @@ namespace Parquet.Encodings {
 
         public static void Encode(ReadOnlySpan<short> data, Stream destination) {
 
-            // copy shorts into ints
+            // PATCHED: same use-after-return as the byte overload above.
             int[] ints = ArrayPool<int>.Shared.Rent(data.Length);
             try {
                 for(int i = 0; i < data.Length; i++)
                     ints[i] = data[i];
+
+                Encode(ints.AsSpan(0, data.Length), destination);
             } finally {
                 ArrayPool<int>.Shared.Return(ints);
             }
-
-            Encode(ints.AsSpan(0, data.Length), destination);
         }
 
         public static int Decode(Span<byte> source, Span<short> data) {
@@ -576,16 +583,16 @@ namespace Parquet.Encodings {
 
         public static void Encode(ReadOnlySpan<ushort> data, Stream destination) {
 
-            // copy ushorts into ints
+            // PATCHED: same use-after-return as the byte overload above.
             int[] ints = ArrayPool<int>.Shared.Rent(data.Length);
             try {
                 for(int i = 0; i < data.Length; i++)
                     ints[i] = data[i];
+
+                Encode(ints.AsSpan(0, data.Length), destination);
             } finally {
                 ArrayPool<int>.Shared.Return(ints);
             }
-
-            Encode(ints.AsSpan(0, data.Length), destination);
         }
 
         public static int Decode(Span<byte> source, Span<ushort> data) {
