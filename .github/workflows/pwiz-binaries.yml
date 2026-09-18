@@ -8,7 +8,7 @@ name: 'ProteoWizard binaries'
 env:
   VERSION: 4.25.0
   # Bump for every patch shipped to pwiz. A tag push must match VERSION+PACKAGE_SUFFIX.
-  PACKAGE_SUFFIX: '-osprey1'
+  PACKAGE_SUFFIX: '-osprey3'
   # Must stay 4.0.0: pwiz app.config binding redirects resolve against it.
   ASM_VERSION: 4.0.0
 

@@ -34,7 +34,7 @@ The version is the single `VERSION` + `PACKAGE_SUFFIX` pair at the top of the
 workflow. To ship a new patch:
 
 1. Bump `PACKAGE_SUFFIX` (`-osprey<N>`) in the workflow and commit it with the patch.
-2. Push a tag named exactly `<VERSION><PACKAGE_SUFFIX>`, e.g. `4.25.0-osprey1`.
+2. Push a tag named exactly `<VERSION><PACKAGE_SUFFIX>`, e.g. `4.25.0-osprey3`.
    The build job refuses a tag that does not match the workflow's version, and a
    matching tag additionally creates a GitHub Release with the same files attached.
 3. Copy `ParquetNet.dll` and `ParquetNet.xml` from the artifact or release into
@@ -46,7 +46,7 @@ workflow. To ship a new patch:
 # From this directory:
 dotnet build src/Parquet/Parquet.csproj -c Release `
     -p:NuGetAudit=false `
-    -p:Version=4.25.0-osprey1 `
+    -p:Version=4.25.0-osprey3 `
     -p:FileVersion=4.25.0 `
     -p:AssemblyVersion=4.0.0
 ```
@@ -66,7 +66,7 @@ Notes on the flags:
 * `-p:FileVersion=4.25.0` — keeps the file-version field aligned with the upstream
   release so version inspection clearly identifies the source release the patch
   is built on top of.
-* `-p:Version=4.25.0-osprey1` — distinguishes the patched build from a stock
+* `-p:Version=4.25.0-osprey3` — distinguishes the patched build from a stock
   `Parquet.Net 4.25.0` NuGet package; bump the `-osprey<N>` suffix when applying
   additional patches, and keep it in step with `PACKAGE_SUFFIX` in the workflow.
 
