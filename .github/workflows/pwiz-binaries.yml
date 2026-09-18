@@ -1,0 +1,123 @@
+name: 'ProteoWizard binaries'
+
+# Builds the patched Parquet.dll that pwiz ships as
+# pwiz_tools/Shared/Lib/Parquet/ParquetNet.dll. Upstream's build.yml only runs on
+# master (and deploys docs/Floor); this workflow covers the ProteoWizard patch
+# branches. See BUILD.md for how the artifacts are consumed.
+
+env:
+  VERSION: 4.25.0
+  # Bump for every patch shipped to pwiz. A tag push must match VERSION+PACKAGE_SUFFIX.
+  PACKAGE_SUFFIX: '-osprey1'
+  # Must stay 4.0.0: pwiz app.config binding redirects resolve against it.
+  ASM_VERSION: 4.0.0
+
+on:
+  push:
+    branches-ignore: [ master ]
+    tags: [ '4.*-osprey*' ]
+  pull_request:
+    branches-ignore: [ master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            6.0.x
+            8.0.x
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pyarrow (integration tests)
+        run: pip install pyarrow pandas
+      - name: Test
+        # A struct-skip regression spins at EOF rather than failing, so a hang is a failure.
+        run: dotnet test src/Parquet.Test/Parquet.Test.csproj -c Release -p:NuGetAudit=false --blame-hang --blame-hang-timeout 10m
+
+  build:
+    name: Build ParquetNet.dll
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Resolve version
+        shell: bash
+        run: |
+          FULL_VERSION="${VERSION}${PACKAGE_SUFFIX}"
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "$FULL_VERSION" ]]; then
+            echo "::error::tag '$GITHUB_REF_NAME' does not match VERSION+PACKAGE_SUFFIX '$FULL_VERSION'; bump PACKAGE_SUFFIX in this workflow first"
+            exit 1
+          fi
+          echo "FULL_VERSION=$FULL_VERSION" >> "$GITHUB_ENV"
+
+      - name: Stamp Globals.cs
+        # Upstream CI does the same with envsubst; Globals.Version ends up in every
+        # written file's created_by. A local build leaves the ${VERSION} placeholders.
+        shell: bash
+        run: |
+          sed -i -e 's/${VERSION}/'"$FULL_VERSION"'/' -e 's/${GITHUB_SHA}/'"$GITHUB_SHA"'/' src/Parquet/Globals.cs
+          grep -E 'Version|GithubSha' src/Parquet/Globals.cs
+
+      - name: Build
+        shell: bash
+        run: dotnet build src/Parquet/Parquet.csproj -c Release -p:NuGetAudit=false -p:ContinuousIntegrationBuild=true -p:Version=$FULL_VERSION -p:FileVersion=$VERSION -p:AssemblyVersion=$ASM_VERSION
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir artifacts
+          out=src/Parquet/bin/Release
+          cp $out/netstandard2.0/Parquet.dll artifacts/ParquetNet.dll
+          cp $out/netstandard2.0/Parquet.pdb artifacts/ParquetNet.pdb
+          cp $out/netstandard2.0/Parquet.xml artifacts/ParquetNet.xml
+          cp $out/*.nupkg artifacts/
+          echo "$FULL_VERSION+$GITHUB_SHA" > artifacts/version.txt
+          ls -l artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ParquetNet-${{ env.FULL_VERSION }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [ test, build ]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ParquetNet-*
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          files: artifacts/*
+          body: |
+            Patched Parquet.Net for ProteoWizard, built from ${{ github.sha }}.
+
+            Copy `ParquetNet.dll` and `ParquetNet.xml` into `pwiz_tools/Shared/Lib/Parquet/` in pwiz.
+            `PATCH-NOTES.md` on the source branch lists what differs from upstream 4.25.0.

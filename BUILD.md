@@ -15,7 +15,32 @@ Osprey consume it. Build outputs are not committed to this fork; the
 `-p:Version` suffix and the git SHA embedded in the dll's informational version
 (`4.25.0-osprey<N>+<sha>`) tie a shipped binary back to the commit it was built from.
 
-## Rebuilding
+## CI builds (the binary to ship)
+
+`.github/workflows/pwiz-binaries.yml` runs on every push to a non-`master` branch
+and on pull requests into one. It runs the unit tests on Windows and Ubuntu, builds
+`Parquet.csproj` in Release with the flags below, and uploads a
+`ParquetNet-<version>` artifact holding `ParquetNet.dll`, `ParquetNet.pdb`,
+`ParquetNet.xml`, the `.nupkg`, and a `version.txt` with the exact
+`<version>+<sha>` it was built from.
+
+Prefer the CI artifact over a local build for anything that ships. CI stamps
+`src/Parquet/Globals.cs` (as upstream's own CI does) so `Globals.Version` and
+`Globals.GithubSha` are real values; a local build leaves the literal
+`${VERSION}` / `${GITHUB_SHA}` placeholders, and they end up in the `created_by`
+field of every parquet file the library writes.
+
+The version is the single `VERSION` + `PACKAGE_SUFFIX` pair at the top of the
+workflow. To ship a new patch:
+
+1. Bump `PACKAGE_SUFFIX` (`-osprey<N>`) in the workflow and commit it with the patch.
+2. Push a tag named exactly `<VERSION><PACKAGE_SUFFIX>`, e.g. `4.25.0-osprey1`.
+   The build job refuses a tag that does not match the workflow's version, and a
+   matching tag additionally creates a GitHub Release with the same files attached.
+3. Copy `ParquetNet.dll` and `ParquetNet.xml` from the artifact or release into
+   `pwiz_tools/Shared/Lib/Parquet/` in pwiz and commit them there.
+
+## Rebuilding locally
 
 ```pwsh
 # From this directory:
@@ -43,11 +68,12 @@ Notes on the flags:
   is built on top of.
 * `-p:Version=4.25.0-osprey1` — distinguishes the patched build from a stock
   `Parquet.Net 4.25.0` NuGet package; bump the `-osprey<N>` suffix when applying
-  additional patches.
+  additional patches, and keep it in step with `PACKAGE_SUFFIX` in the workflow.
 
-## Deploying
+## Deploying a local build
 
-After building, copy the `netstandard2.0` outputs into your pwiz checkout:
+For local iteration only (see "CI builds" above for what to ship), copy the
+`netstandard2.0` outputs into your pwiz checkout:
 
 ```pwsh
 Copy-Item src/Parquet/bin/Release/netstandard2.0/Parquet.dll `
