@@ -1,20 +1,19 @@
 # Building the Parquet.Net fork
 
-This is the maccoss-developers fork of [aloneguid/parquet-dotnet](https://github.com/aloneguid/parquet-dotnet)
-(MIT-licensed) at tag **4.25.0**, with a small patch to `ThriftCompactProtocolReader`
+This is the `pwiz/4.25.0` branch of the ProteoWizard fork of
+[aloneguid/parquet-dotnet](https://github.com/aloneguid/parquet-dotnet)
+(MIT-licensed): tag **4.25.0** plus a small patch to `ThriftCompactProtocolReader`
 to fix a struct-skip bug that prevents reading parquet files emitted by
 `parquet-rs >= 58` (the Rust crate used by `maccoss/osprey`). See `PATCH-NOTES.md`
 for the patch summary.
 
 ## Output
 
-A patched `Parquet.dll` is built and renamed to `ParquetNet.dll`, then copied to:
-
-* `BinariesForProteoWizard/ParquetNet.{dll,pdb,xml}` — local artifact in this fork
-* `pwiz_tools/Shared/Lib/Parquet/ParquetNet.dll` — consumed by Skyline and OspreySharp
-
-This matches the existing fork pattern used by `DigitalRune-Docking-Windows`
-elsewhere in this repo.
+A patched `Parquet.dll` is built and renamed to `ParquetNet.dll`, then committed to
+the pwiz repo as `pwiz_tools/Shared/Lib/Parquet/ParquetNet.dll`, where Skyline and
+Osprey consume it. Build outputs are not committed to this fork; the
+`-p:Version` suffix and the git SHA embedded in the dll's informational version
+(`4.25.0-osprey<N>+<sha>`) tie a shipped binary back to the commit it was built from.
 
 ## Rebuilding
 
@@ -48,24 +47,20 @@ Notes on the flags:
 
 ## Deploying
 
-After building, copy the four target outputs to `BinariesForProteoWizard/`:
+After building, copy the `netstandard2.0` outputs into your pwiz checkout:
 
 ```pwsh
 Copy-Item src/Parquet/bin/Release/netstandard2.0/Parquet.dll `
-    BinariesForProteoWizard/ParquetNet.dll
-Copy-Item src/Parquet/bin/Release/netstandard2.0/Parquet.pdb `
-    BinariesForProteoWizard/ParquetNet.pdb
+    <pwiz>/pwiz_tools/Shared/Lib/Parquet/ParquetNet.dll
 Copy-Item src/Parquet/bin/Release/netstandard2.0/Parquet.xml `
-    BinariesForProteoWizard/ParquetNet.xml
+    <pwiz>/pwiz_tools/Shared/Lib/Parquet/ParquetNet.xml
 ```
 
 (`netstandard2.0` is the right TFM for both the Skyline net472 build and the
 OspreySharp net472 / net8.0 builds since 4.25.0 doesn't ship a net472-specific
 TFM and netstandard2.0 is the lowest common denominator.)
 
-Then copy `BinariesForProteoWizard/ParquetNet.dll` (and `ParquetNet.xml`) into
-`pwiz_tools/Shared/Lib/Parquet/` in your pwiz checkout for the consumers to
-pick up.
+Commit the copied files in pwiz for the consumers to pick up.
 
 ## Upstream tracking
 

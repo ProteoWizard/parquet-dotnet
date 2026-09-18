@@ -78,7 +78,9 @@ keeps the upstream sources buildable without touching the field names.
 ## Upstream PR
 
 Filed as **[aloneguid/parquet-dotnet#747](https://github.com/aloneguid/parquet-dotnet/pull/747)**
-on 2026-05-07.
+on 2026-05-07. The maintainer closed it the same day without comment; as of
+2026-09-18 upstream `master` still has the empty struct-skip loop, so the patch
+stays on this fork.
 
 Scope of the upstream PR is the `ThriftCompactProtocolReader` change plus a
 focused regression test in `src/Parquet.Test/ThriftTest.cs`. The
@@ -93,6 +95,5 @@ Once #747 lands and a release ships:
     upstream NuGet release
   * delete `pwiz_tools/OspreySharp/Directory.Build.targets`'s
     `OverridePatchedParquetNet` target (no longer needed)
-  * archive or delete this fork (the `BinariesForProteoWizard/` artifacts
-    can be removed; the `src/` source can stay or go depending on whether
-    you want a reproducible record of what we built against)
+  * retire this branch (keep it, or a tag, as the reproducible record of
+    what the shipped `ParquetNet.dll` was built from)
