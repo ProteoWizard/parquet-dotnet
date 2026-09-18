@@ -260,19 +260,22 @@ as well as run time. This is the same shape `Skyline.csproj` already used.
 same `Shared/Lib/Parquet/ParquetNet.dll` directly, so one binary serves both. A
 net8.0-only build would break Skyline.
 
-Rebuild and stage with the commands in the "Rebuilding the fork" section of the
-Osprey handoff notes - a `Release` build of `src/Parquet/Parquet.csproj` pinned to
-`-p:Version=4.25.0-osprey2 -p:FileVersion=4.25.0 -p:AssemblyVersion=4.0.0`, then
-copy `src/Parquet/bin/Release/netstandard2.0/Parquet.dll` to BOTH
-`<pwiz>\pwiz_tools\Shared\Lib\Parquet\ParquetNet.dll` and
-`BinariesForProteoWizard\ParquetNet.dll`.
+Rebuild and stage with the commands in `BUILD.md` - a `Release` build of
+`src/Parquet/Parquet.csproj` pinned to
+`-p:Version=4.25.0-osprey<N> -p:FileVersion=4.25.0 -p:AssemblyVersion=4.0.0`
+(bump `<N>` for each new patch; the shipped dll's informational version records
+it alongside the source SHA), then copy
+`src/Parquet/bin/Release/netstandard2.0/Parquet.dll` to
+`<pwiz>\pwiz_tools\Shared\Lib\Parquet\ParquetNet.dll`.
 
 ## Upstream PR
 
 The struct-skip fix is filed as
 **[aloneguid/parquet-dotnet#747](https://github.com/aloneguid/parquet-dotnet/pull/747)**
 (2026-05-07). Scope is the `ThriftCompactProtocolReader` change plus a focused
-regression test in `src/Parquet.Test/ThriftTest.cs`.
+regression test in `src/Parquet.Test/ThriftTest.cs`, which this fork also carries.
+The maintainer closed the PR the same day without comment; as of 2026-09-18
+upstream `master` still has the empty struct-skip loop, so the patch stays here.
 
 Not upstreamed:
 * the `Parquet.csproj` `<LangVersion>12</LangVersion>` pin - local build artifact
@@ -300,4 +303,5 @@ If both are ever resolved upstream:
     `ExcludeAssets="compile"` and the direct `<Reference>`)
   * delete the `OverridePatchedParquetNet` target in
     `pwiz_tools/Osprey/Directory.Build.targets`
-  * archive or delete this fork
+  * retire this branch (keep it, or a tag, as the reproducible record of
+    what the shipped `ParquetNet.dll` was built from)
